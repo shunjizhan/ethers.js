@@ -373,7 +373,7 @@ function addContractWait(contract: Contract, tx: TransactionResponse) {
 }
 
 /* -----------
-   decorate all the contract methods
+   decorate all the contract const methods
    will also make sure `contract._deployed`
                                ----------- */
 function buildCall(contract: Contract, fragment: FunctionFragment, collapseSimple: boolean): ContractFunction {
@@ -419,6 +419,10 @@ function buildCall(contract: Contract, fragment: FunctionFragment, collapseSimpl
     };
 }
 
+/* -----------
+   decorate all the contract call methods
+   will also make sure `contract._deployed`
+                               ----------- */
 function buildSend(contract: Contract, fragment: FunctionFragment): ContractFunction<TransactionResponse> {
     return async function(...args: Array<any>): Promise<TransactionResponse> {
         if (!contract.signer) {
@@ -443,6 +447,10 @@ function buildSend(contract: Contract, fragment: FunctionFragment): ContractFunc
     };
 }
 
+/* -----------
+   decorate all the contract methods
+   invoked by `Contract.constructor`
+                               ----------- */
 function buildDefault(contract: Contract, fragment: FunctionFragment, collapseSimple: boolean): ContractFunction {
     if (fragment.constant) {
         return buildCall(contract, fragment, collapseSimple);
