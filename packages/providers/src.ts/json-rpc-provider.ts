@@ -177,12 +177,14 @@ export class JsonRpcSigner extends Signer implements TypedDataSigner {
         // The JSON-RPC for eth_sendTransaction uses 90000 gas; if the user
         // wishes to use this, it is easy to specify explicitly, otherwise
         // we look it up for them.
+        // first check and update gas by `eth_estimateGas()`
         if (transaction.gasLimit == null) {
             const estimate = shallowCopy(transaction);
             estimate.from = fromAddress;
             transaction.gasLimit = this.provider.estimateGas(estimate);
         }
 
+        // resolve `to` in case it's ENS
         if (transaction.to != null) {
             transaction.to = Promise.resolve(transaction.to).then(async (to) => {
                 if (to == null) { return null; }
@@ -199,6 +201,7 @@ export class JsonRpcSigner extends Signer implements TypedDataSigner {
             sender: fromAddress
         }).then(({ tx, sender }) => {
 
+            // make sure tx sender is the same as signer address
             if (tx.from != null) {
                 if (tx.from.toLowerCase() !== sender) {
                     logger.throwArgumentError("from address mismatch", "transaction", transaction);
@@ -208,7 +211,8 @@ export class JsonRpcSigner extends Signer implements TypedDataSigner {
             }
 
             const hexTx = (<any>this.provider.constructor).hexlifyTransaction(tx, { from: true });
-
+            
+            // eth_sendTransaction ???
             return this.provider.send("eth_sendTransaction", [ hexTx ]).then((hash) => {
                 return hash;
             }, (error) => {
@@ -223,11 +227,14 @@ export class JsonRpcSigner extends Signer implements TypedDataSigner {
         });
     }
 
+    // ***core*** JsonRpcSigner.sendTransaction
+    // default for hardhat
     async sendTransaction(transaction: Deferrable<TransactionRequest>): Promise<TransactionResponse> {
         // This cannot be mined any earlier than any recent block
         const blockNumber = await this.provider._getInternalBlockNumber(100 + 2 * this.provider.pollingInterval);
 
         // Send the transaction
+        // it calls `eth_sendTransaction()` ??
         const hash = await this.sendUncheckedTransaction(transaction);
 
         try {
@@ -235,6 +242,7 @@ export class JsonRpcSigner extends Signer implements TypedDataSigner {
             // for a response, and we need the actual transaction, so we poll
             // for it; it should show up very quickly
             return await poll(async () => {
+                // default provider: JsonRpcProvider
                 const tx = await this.provider.getTransaction(hash);
                 if (tx === null) { return undefined; }
                 return this.provider._wrapTransaction(tx, hash, blockNumber);
@@ -440,6 +448,7 @@ export class JsonRpcProvider extends BaseProvider {
             return this._cache[method];
         }
 
+        // the actual axios.post(request)
         const result = fetchJson(this.connection, JSON.stringify(request), getResult).then((result) => {
             this.emit("debug", {
                 action: "response",
@@ -472,6 +481,7 @@ export class JsonRpcProvider extends BaseProvider {
         return result;
     }
 
+    // transform method to `eth_xxx`, and do some modification on the params
     prepareRequest(method: string, params: any): [ string, Array<any> ] {
         switch (method) {
             case "getBlockNumber":
@@ -551,6 +561,10 @@ export class JsonRpcProvider extends BaseProvider {
             }
         }
 
+        /* -------
+           this is where request name is transformed to `eth_xxx`
+           args looks like [eth_xxx, params]
+                                                          ------- */
         const args = this.prepareRequest(method,  params);
 
         if (args == null) {
