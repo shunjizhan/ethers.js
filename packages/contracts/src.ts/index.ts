@@ -372,6 +372,10 @@ function addContractWait(contract: Contract, tx: TransactionResponse) {
     };
 }
 
+/* -----------
+   decorate all the contract const methods
+   will also make sure `contract._deployed`
+                               ----------- */
 function buildCall(contract: Contract, fragment: FunctionFragment, collapseSimple: boolean): ContractFunction {
     const signerOrProvider = (contract.signer || contract.provider);
 
@@ -388,6 +392,7 @@ function buildCall(contract: Contract, fragment: FunctionFragment, collapseSimpl
         }
 
         // If the contract was just deployed, wait until it is mined
+        // make sure contract is deployed
         if (contract.deployTransaction != null) {
             await contract._deployed(blockTag);
         }
@@ -414,6 +419,10 @@ function buildCall(contract: Contract, fragment: FunctionFragment, collapseSimpl
     };
 }
 
+/* -----------
+   decorate all the contract call methods
+   will also make sure `contract._deployed`
+                               ----------- */
 function buildSend(contract: Contract, fragment: FunctionFragment): ContractFunction<TransactionResponse> {
     return async function(...args: Array<any>): Promise<TransactionResponse> {
         if (!contract.signer) {
@@ -438,6 +447,10 @@ function buildSend(contract: Contract, fragment: FunctionFragment): ContractFunc
     };
 }
 
+/* -----------
+   decorate all the contract methods
+   invoked by `Contract.constructor`
+                               ----------- */
 function buildDefault(contract: Contract, fragment: FunctionFragment, collapseSimple: boolean): ContractFunction {
     if (fragment.constant) {
         return buildCall(contract, fragment, collapseSimple);
@@ -827,6 +840,7 @@ export class BaseContract {
         return this._deployed();
     }
 
+    // make sure contract is deployed by calling tx.wait()
     _deployed(blockTag?: BlockTag): Promise<Contract> {
         if (!this._deployedPromise) {
 
@@ -1148,6 +1162,8 @@ export class ContractFactory {
 
     readonly interface: Interface;
     readonly bytecode: string;
+
+    // default signer for hardhat: JsonRpcSigner
     readonly signer: Signer;
 
     constructor(contractInterface: ContractInterface, bytecode: BytesLike | { object: string }, signer?: Signer) {
@@ -1226,6 +1242,7 @@ export class ContractFactory {
         return tx
     }
 
+    // CORE: contract.deploy() here
     async deploy(...args: Array<any>): Promise<Contract> {
 
         let overrides: any = { };
@@ -1246,14 +1263,30 @@ export class ContractFactory {
         const unsignedTx = this.getDeployTransaction(...params);
 
         // Send the deployment transaction
+        /* -----
+           hardhat default: JsonRpcSigner, with a slightly different inner provider
+                                                                              ----- */
         const tx = await this.signer.sendTransaction(unsignedTx);
 
+        /* --------------------
+           getStatic basically finds a method by name from the proto chain, in this case it's it's own static method
+
+           calculated the deterministic ETH contract address, tx can't be null, since it uses the nonce and address
+           if tx is null here, it will throw "missing from" error. So prev step should use `getTransactionByHash`.
+
+           at this point tx can be pending, but we can already calculate contract address using nonce and from, which
+           it not null even if the tx is pending
+                                                                                                -------------------- */
         const address = getStatic<(tx: TransactionResponse) => string>(this.constructor, "getContractAddress")(tx);
+
+        // construct a new contract instance using the returned contract address from receipt
         const contract = getStatic<(address: string, contractInterface: ContractInterface, signer?: Signer) => Contract>(this.constructor, "getContract")(address, this.interface, this.signer);
 
         // Add the modified wait that wraps events
         addContractWait(contract, tx);
 
+        // when actually calling the contract methods, it will make sure `contract.deployed()`
+        // by contract.deployTransaction.wait()
         defineReadOnly(contract, "deployTransaction", tx);
         return contract;
     }

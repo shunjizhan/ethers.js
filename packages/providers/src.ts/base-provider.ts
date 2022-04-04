@@ -683,6 +683,7 @@ export class BaseProvider extends Provider implements EnsProvider {
     _networkPromise: Promise<Network>;
     _network: Network;
 
+    // event listeners
     _events: Array<Event>;
 
     formatter: Formatter;
@@ -1261,6 +1262,11 @@ export class BaseProvider extends Provider implements EnsProvider {
         return this._waitForTransaction(transactionHash, (confirmations == null) ? 1: confirmations, timeout || 0, null);
     }
 
+    /* ----------
+       core function to wait for txhash to have this number of confirmations
+       if wait(0), will return whatever getTransactionReceipt() returns
+       if wait(n), will kept checking replacements by checking all TXs in a block (I think we don't need this part)
+                                                                         ---------- */
     async _waitForTransaction(transactionHash: string, confirmations: number, timeout: number, replaceable: { data: string, from: string, nonce: number, to: string, value: BigNumber, startBlock: number }): Promise<TransactionReceipt> {
         const receipt = await this.getTransactionReceipt(transactionHash);
 
@@ -1284,9 +1290,16 @@ export class BaseProvider extends Provider implements EnsProvider {
                 if (alreadyDone()) { return; }
                 resolve(receipt);
             }
+
+            /* --------------
+              listen to transactionHash, minedHandler will:
+                - do nothing if confirmations is not enough
+                - resolve if confirmations is enough
+                                                ----------  */
             this.on(transactionHash, minedHandler);
             cancelFuncs.push(() => { this.removeListener(transactionHash, minedHandler); });
 
+            // wait(n) where n > 0 will trigger this block, and replaceable !== undefined
             if (replaceable) {
                 let lastBlockNumber = replaceable.startBlock;
                 let scannedBlock: number = null;
@@ -1302,10 +1315,12 @@ export class BaseProvider extends Provider implements EnsProvider {
                         if (done) { return; }
 
                         if (nonce <= replaceable.nonce) {
+                            // this `from` address has no new transaction
                             lastBlockNumber = blockNumber;
 
                         } else {
                             // First check if the transaction was mined
+                            // check if the transaction was mined by checking `eth_getTransactionByHash`
                             {
                                 const mined = await this.getTransaction(transactionHash);
                                 if (mined && mined.blockNumber != null) { return; }
@@ -1333,6 +1348,7 @@ export class BaseProvider extends Provider implements EnsProvider {
                                     if (tx.hash === transactionHash) { return; }
 
                                     // Matches our transaction from and nonce; its a replacement
+                                    // I think this should never happen to us?
                                     if (tx.from === replaceable.from && tx.nonce === replaceable.nonce) {
                                         if (done) { return; }
 
@@ -1366,6 +1382,7 @@ export class BaseProvider extends Provider implements EnsProvider {
                             }
                         }
 
+                        // if finished, return, otherwise kept doing loop for new blocks
                         if (done) { return; }
                         this.once("block", replaceHandler);
 
@@ -1376,6 +1393,8 @@ export class BaseProvider extends Provider implements EnsProvider {
                 };
 
                 if (done) { return; }
+
+                // when there is a new block, trigger replaceHandler
                 this.once("block", replaceHandler);
 
                 cancelFuncs.push(() => {
@@ -1383,6 +1402,7 @@ export class BaseProvider extends Provider implements EnsProvider {
                 });
             }
 
+            // deal with timeout, if already resolved, don't throw timeout error
             if (typeof(timeout) === "number" && timeout > 0) {
                 const timer = setTimeout(() => {
                     if (alreadyDone()) { return; }
@@ -1486,6 +1506,7 @@ export class BaseProvider extends Provider implements EnsProvider {
     }
 
     // This should be called by any subclass wrapping a TransactionResponse
+    // this basically just add tx.wait to tx
     _wrapTransaction(tx: Transaction, hash?: string, startBlock?: number): TransactionResponse {
         if (hash != null && hexDataLength(hash) !== 32) { throw new Error("invalid response - sendTransaction"); }
 
@@ -1496,6 +1517,7 @@ export class BaseProvider extends Provider implements EnsProvider {
             logger.throwError("Transaction hash mismatch from Provider.sendTransaction.", Logger.errors.UNKNOWN_ERROR, { expectedHash: tx.hash, returnedHash: hash });
         }
 
+        // defult wait block is 1
         result.wait = async (confirms?: number, timeout?: number) => {
             if (confirms == null) { confirms = 1; }
             if (timeout == null) { timeout = 0; }
@@ -1513,12 +1535,15 @@ export class BaseProvider extends Provider implements EnsProvider {
                 };
             }
 
+            // wait(0) => replacement === undefined
+            // wait(n) => replacement !== undefined
             const receipt = await this._waitForTransaction(tx.hash, confirms, timeout, replacement);
             if (receipt == null && confirms === 0) { return null; }
 
             // No longer pending, allow the polling loop to garbage collect this
             this._emitted["t:" + tx.hash] = receipt.blockNumber;
 
+            // here checks receipt result
             if (receipt.status === 0) {
                 logger.throwError("transaction failed", Logger.errors.CALL_EXCEPTION, {
                     transactionHash: tx.hash,
@@ -1532,14 +1557,24 @@ export class BaseProvider extends Provider implements EnsProvider {
         return result;
     }
 
+    // BaseProvider.sendTransaction
     async sendTransaction(signedTransaction: string | Promise<string>): Promise<TransactionResponse> {
         await this.getNetwork();
         const hexTx = await Promise.resolve(signedTransaction).then(t => hexlify(t));
-        const tx = this.formatter.transaction(signedTransaction);
+
+        // parse signedTx: string to tx object
+        const tx = this.formatter.transaction(signedTransaction);       
         if (tx.confirmations == null) { tx.confirmations = 0; }
         const blockNumber = await this._getInternalBlockNumber(100 + 2 * this.pollingInterval);
         try {
+            // in JSONRPCProvider `sendTransaction` => `eth_sendRawTransaction`
             const hash = await this.perform("sendTransaction", { signedTransaction: hexTx });
+
+            /* ----------
+               previous method only sends and get a hash back
+               at this point tx.wait === undefined
+               next step is to wrap it and attach tx.wait
+                                                   ---------- */
             return this._wrapTransaction(tx, hash, blockNumber);
         } catch (error) {
             (<any>error).transaction = tx;
@@ -1820,6 +1855,7 @@ export class BaseProvider extends Provider implements EnsProvider {
         return <Promise<BlockWithTransactions>>(this._getBlock(blockHashOrBlockTag, true));
     }
 
+    // getTransaction calls `eth_getTransactionByHash()` so can distinguish pending tx
     async getTransaction(transactionHash: string | Promise<string>): Promise<TransactionResponse> {
         await this.getNetwork();
         transactionHash = await transactionHash;
@@ -1827,6 +1863,7 @@ export class BaseProvider extends Provider implements EnsProvider {
         const params = { transactionHash: this.formatter.hash(transactionHash, true) };
 
         return poll(async () => {
+            // in JSONRPCProvider `getTransaction` => `eth_getTransactionByHash()`
             const result = await this.perform("getTransaction", params);
 
             if (result == null) {
@@ -1839,6 +1876,7 @@ export class BaseProvider extends Provider implements EnsProvider {
             const tx = this.formatter.transactionResponse(result);
 
             if (tx.blockNumber == null) {
+                // tx is still pending
                 tx.confirmations = 0;
 
             } else if (tx.confirmations == null) {
@@ -1861,10 +1899,16 @@ export class BaseProvider extends Provider implements EnsProvider {
 
         const params = { transactionHash: this.formatter.hash(transactionHash, true) };
 
+        /* ------------------
+           poll() treat `null` as valid result and will return directly
+           if want to repeat poll, the inner function need to return `undefined`
+                                                               ----------------- */
         return poll(async () => {
+            // JSONRPCProvider will handle `getTransactionReceipt` => `eth_getTransactionReceipt()`
             const result = await this.perform("getTransactionReceipt", params);
 
             if (result == null) {
+                // if no event related to this hash have been emitted, return null ???
                 if (this._emitted["t:" + transactionHash] == null) {
                     return null;
                 }
@@ -2069,6 +2113,7 @@ export class BaseProvider extends Provider implements EnsProvider {
         return avatar.url;
     }
 
+    // perform is overrides by JSONRpcProvider
     perform(method: string, params: any): Promise<any> {
         return logger.throwError(method + " not implemented", Logger.errors.NOT_IMPLEMENTED, { operation: method });
     }
@@ -2089,10 +2134,15 @@ export class BaseProvider extends Provider implements EnsProvider {
         return this;
     }
 
+    /* --------------
+       eventName can be a string, for transactions each tx hash is a event
+       `on(txHash, minedHandler)`
+                                                              ------------ */
     on(eventName: EventType, listener: Listener): this {
         return this._addEventListener(eventName, listener, false);
     }
 
+    // add a evnet listener that will only trigger once
     once(eventName: EventType, listener: Listener): this {
         return this._addEventListener(eventName, listener, true);
     }
